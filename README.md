@@ -1,10 +1,10 @@
 # ebook-isbn
 An eBook tool to extract ISBN or Metadata form eBook and rename them by using ISBN database and Metadata
 
-# Requrement
+# Requirement
 1. Python 2.7
 2. isbnlib 3.5.5 [https://pypi.python.org/pypi/isbnlib/3.5.5](https://pypi.python.org/pypi/isbnlib/3.5.5)
-3. Apache Tika 1.8 [https://tika.apache.org/download.html](https://tika.apache.org/download.html)
+3. Apache Tika 1.8 [https://tika.apache.org/download.html](https://tika.apache.org/download.html) (including in app folder)
 
 # Command
 python rename.py [the PATH of eBook]
@@ -14,8 +14,8 @@ There are six kinds of fields for the filename pattern. You can set it in rename
 
 # Result
 1. If some filenames start with "EMANER_", it means the metadata were found and the files were renamed successfully.
-2. if some filenames start with "DELIAF_", it means the metadata weren't found and the files failed to be renamed.
-3. The program will skip processing for any files taht start with "EMANER_" or "DELIAF_".
+2. If some filenames start with "DELIAF_", it means the metadata weren't found and the files failed to be renamed.
+3. The program will skip processing for any files that start with "EMANER_" or "DELIAF_".
 
 # Q&A
 **Q: If you meet some errors like "python 'ascii' codec can't decode byte 0xa1" or "UnicodeDecodeError: 'big5' codec can't decode bytes in position 8-9: illegal mul
