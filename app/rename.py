@@ -25,6 +25,7 @@ sys.path.append("../bookinfo")
 from metasearch import BookMeta
 
 logger = logging.getLogger('metasearch')
+IGNORE_PREFIX = ['EMANER_', 'DELIAF_', 'NRAW_', 'TSIXE-NUM', 'RORREPTTH_', 'YNAMOOT_']
 
 if __name__ == '__main__':
     # print("argv number = " + str(len(sys.argv)))
@@ -45,7 +46,9 @@ if __name__ == '__main__':
         logging.debug('filesystemencoding = ' + sys.getfilesystemencoding())
         for root, dirs, files in os.walk(unicode(sys.argv[1], sys.getfilesystemencoding())):
             for f in files:
-                if f.endswith(('.pdf', '.epub')) and not f.startswith('EMANER_'):
+                if f.endswith(('.pdf', '.epub')) and not f.startswith('EMANER_') and not f.startswith(
+                        'DELIAF_') and not f.startswith('NRAW_') and not f.startswith('TSIXE-NUM') and not f.startswith(
+                        'RORREPTTH_') and not f.startswith('YNAMOOT_'):
                     filename = os.path.join(root, f)
                     logger.debug('====== ====== ====== ====== ====== ======')
                     logger.debug('Processing ' + filename)

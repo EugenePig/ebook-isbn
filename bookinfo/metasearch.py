@@ -17,9 +17,11 @@
 
 import HTMLParser
 import logging
+from random import randint
 import re
 import os
 import subprocess
+import time
 import zipfile
 
 import isbnlib
@@ -71,18 +73,34 @@ class EpubParser(HTMLParser.HTMLParser):
 class BookMeta:
     PATTERN_FIELD = ['Publisher', 'Year', 'Title', 'Author', 'Language', 'ISBN-13']
     DEFAULT_PATTERN = ['Publisher', 'Year', 'Author', 'Title', 'Language' 'ISBN-13']
+    SPECIAL_ISBN = ['0000000000']
+    ISBN10_PATTERN_1 = re.compile(r'(?:\s|^)[- 0-9X]{10,16}(?:\s|$)')
+    ISBN10_PATTERN_2 = re.compile(r'ISBN[\x20\w\t\(\)]{0,40}[0-9xX]{10}(?:\s|$)')
+    ISBN13_PATTERN_1 = re.compile(r'97[89][-0-9 ]{14}(?:\s|$)')
+    ISBN13_PATTERN_2 = re.compile(r'ISBN[\x20\w\t\(\)]{0,40}97[89]\d{10}(?:\s|$)')
+    ISBN_PATTERN = [ISBN13_PATTERN_1, ISBN10_PATTERN_1, ISBN13_PATTERN_2, ISBN10_PATTERN_2]
+    MAX_HTTP_RETRY = 2
+    MAX_ISBN_COUNT = 5
+    LONG_SLEEP = 300
+    SHORT_SLEEP = 5
+    STATUS_OK = 0
+    STATUS_HTTPERROR = 1
+    STATUS_NOTFOUND = 2
+    STATUS_TOOMANYISBN = 3
 
     def __init__(self, filename, recorder, isbndb='goob', pattern='default'):
         self.filename = filename
         self.recorder = recorder
         self.isbndb = isbndb
         self.pattern = self.check_pattern(pattern)
+        self.isbnfound = False
+        self.status = self.STATUS_OK
 
     def check_pattern(self, patt):
         fields = []
         vaild = False
         if ':' in patt:
-            patt = re.sub(r"\s+", '', patt)
+            patt = re.sub(r'\s+', '', patt)
             fields = patt.split(':')
             for field in fields:
                 if field in self.PATTERN_FIELD:
@@ -94,29 +112,69 @@ class BookMeta:
             fields = self.DEFAULT_PATTERN
         return fields
 
+    def get_canonical_isbn(self, line):
+        # logger.debug('[ ' + line + ' ]')
+        isbns = []
+        for regex in self.ISBN_PATTERN:
+            matches = regex.findall(line)
+            if len(matches) > 0:
+                logger.debug('Unchecked [' + ' '.join(matches) + ']')
+                for match in matches:
+                    match = match.strip()
+                    match = match.replace('i', 'I')
+                    match = match.replace('s', 'S')
+                    match = match.replace('b', 'B')
+                    match = match.replace('n', 'N')
+                    match = re.sub(r'\x20', '', match)
+                    match = re.sub(r'ISBN', 'ISBN\x20', match)
+                    # logger.debug('match= ' + match)
+                    if match not in self.SPECIAL_ISBN:
+                        try:
+                            # logger.debug('isbn= ' + isbn)
+                            isbn = isbnlib.get_canonical_isbn(match)
+                        except:
+                            logger.error('Error in isbnlib while calling get_canonical_isbn')
+                        else:
+                            if isbn:
+                                isbns.append(isbn)
+        return isbns
+
+    def get_canonical_isbn2(self, line):
+        # logger.debug('[ ' + line + ' ]')
+        isbns = []
+        matches = isbnlib.get_isbnlike(line)
+        if len(matches) > 0:
+            logger.debug('Unchecked [' + ' '.join(matches) + ']')
+        for match in matches:
+            if match not in self.SPECIAL_ISBN and not any(match in s for s in isbns):
+                try:
+                    # logger.debug('isbn= ' + isbn)
+                    isbn = isbnlib.get_canonical_isbn(match)
+                except:
+                    logger.error('Error in isbnlib while calling get_canonical_isbn')
+                else:
+                    if isbn:
+                        isbns.append(isbn)
+        return isbns
+
     def get_isbns(self, texts):
+        # logger.debug('[ ' + texts + ' ]')
         lines = texts.splitlines()
-        countdown = 100 # for finding other ISBNs
+        countdown = 100  # for finding other ISBNs
         found = False
         isbns = []
         for line in lines:
-            isbn = ''
-            try:
-                isbn = isbnlib.get_canonical_isbn(line)
-            except:
-                logger.error('Error in isbnlib while calling get_canonical_isbn')
-            # '0000000000' is a special valid ISBN
-            if isbn and isbn != '0000000000':
-                if not any(isbn in s for s in isbns):
+            candidates = self.get_canonical_isbn(line)
+            # candidates = self.get_canonical_isbn2(line)
+            for isbn in candidates:
+                if isbn not in self.SPECIAL_ISBN and not any(isbn in s for s in isbns):
                     isbns.append(isbn)
-                found = True
-
+                    found = True
             if found:
                 countdown -= 1
-
             if countdown < 1:
                 break
-
+        self.isbnfound = found
         if len(isbns) < 1:
             logger.debug('Not Found ISBN in ' + self.filename)
         else:
@@ -126,10 +184,11 @@ class BookMeta:
         return isbns
 
     def extract_texts(self, args):
-        cmd = 'java -jar tika-app-1.8.jar -eUTF-8 ' + args + ' "' + self.filename + '"'
+        cmd = 'java -jar tika-app-1.8.jar -t -eUTF-8 ' + args + ' "' + self.filename + '"'
+        # cmd = 'java -jar pdfbox-app-1.8.9.jar ExtractText -sort -console "' + self.filename + '"'
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
         (output, err) = process.communicate()
-        print(err)
+        # logger.debug(err)
         return output
 
     def extract_epub_texts(self):
@@ -154,7 +213,6 @@ class BookMeta:
                 (key, value) = line.split(': ', 1)
                 if len(key) > 1 and len(value) > 1:
                     meta[key] = value
-
         if ('meta:author' in meta or 'Author' in meta) and ('dc:title' in meta or 'title' in meta):
             logger.debug('HAVE METADATA in epub')
         else:
@@ -163,24 +221,47 @@ class BookMeta:
         return meta
 
     def call_isbnlin_meta(self, isbn):
+
         meta = {}
-        try:
-            logger.debug('Searching ' + isbn)
-            meta = isbnlib.meta(isbn,  self.isbndb)
-        except:
-            logger.debug('Metadata of ISBN ' + isbn + ' Not Found')
-            logger.debug('')
-        else:
-            self.print_metadata(meta)
+        logger.debug('Searching ' + isbn + ' on ' + self.isbndb)
+        count = 0
+        while count <= self.MAX_HTTP_RETRY:
+            try:
+                meta = isbnlib.meta(isbn,  self.isbndb)
+            except Exception as ex:
+                if ex.message.startswith('an HTTP error has ocurred'):
+                    logger.debug('HTTP error ... ...')
+                    logger.debug('Sleep Start : %s' % time.ctime())
+                    count += 1
+                    time.sleep(self.LONG_SLEEP * count)
+                    logger.debug('Sleep End : %s' % time.ctime())
+                    logger.debug('End of Try ' + str(count))
+                elif ex.message.startswith('an URL error has ocurred'):
+                    logger.debug('URL error ... ...')
+                    count += 1
+                else:
+                    logger.debug('Exception: ' + ex.message)
+                    logger.debug('Metadata of ISBN ' + isbn + ' Not Found')
+                    logger.debug('')
+                    if self.status != self.STATUS_HTTPERROR:
+                        self.status = self.STATUS_NOTFOUND
+                    break
+            else:
+                self.print_metadata(meta)
+                break
+        if count > self.MAX_HTTP_RETRY:
+            self.status = self.STATUS_HTTPERROR
         return meta
 
     def get_meta_from_isbnlin(self, isbns):
         meta_array = []
-
         for isbn in isbns:
             meta = self.call_isbnlin_meta(isbn)
+            if self.status == self.STATUS_HTTPERROR:
+                break
             if len(meta) > 0:
                 meta_array.append(meta)
+            time.sleep(self.SHORT_SLEEP)  # avoid http 403 error
         result = {}
         if len(meta_array) > 0:
             if len(meta_array) == 1:
@@ -271,15 +352,19 @@ class BookMeta:
     def get_mata(self):
         texts = ''
         meta_epub = {}
+        meta_isbnlin = []
         if self.filename.endswith('.epub'):
             meta_epub = self.get_epub_meata()
             texts = self.extract_epub_texts()
         elif self.filename.endswith('.pdf'):
-            texts = self.extract_texts('-T')
+            texts = self.extract_texts('-T -t')
             if len(texts) == 0:
                 logger.error('Can not open "' + self.filename + '"')
         isbns = self.get_isbns(texts)
-        meta_isbnlin = self.get_meta_from_isbnlin(isbns)
+        if len(isbns) > self.MAX_ISBN_COUNT:
+            self.status = self.STATUS_TOOMANYISBN
+        else:
+            meta_isbnlin = self.get_meta_from_isbnlin(isbns)
         meta_merged = self.merge_meta(meta_isbnlin, meta_epub)
         if len(meta_merged) > 0:
             logger.debug('Merged Metadata')
@@ -309,18 +394,33 @@ class BookMeta:
             (name, extension) = os.path.splitext(self.filename)
             new_filename += extension
             new_filename = os.path.join(dirname, new_filename)
-            log = 'Rename "' + self.filename + '" to "' + new_filename.encode('utf8') + '"'
-            logger.debug(log)
-            logger.debug('')
+            log = 'Rename "' + self.filename + '" to "' + new_filename + '"'
             try:
                 os.rename(self.filename, new_filename)
+                logger.debug(log)
+                logger.debug('')
                 self.recorder.write(log + '\r\n')
             except:
-                logger.error('!!!!!! [Renaming Fail]: ' + log + ' !!!!!!')
+                exfilename = 'TSIXE-NUM' + str(randint(1, 65535)) + '_' + os.path.basename(self.filename)
+                exfilename = os.path.join(dirname, exfilename)
+                exlog = 'Rename "' + self.filename + '" to "' + exfilename + '"'
+                try:
+                    os.rename(self.filename, exfilename)
+                    logger.error('!!!!!! [Existed File]: ' + new_filename + ' !!!!!!')
+                except:
+                    logger.error('!!!!!! [Renaming Fail]: ' + exlog + ' !!!!!!')
         else:
-            new_filename = 'DELIAF_' + os.path.basename(self.filename)
+            if self.isbnfound:
+                if self.status == self.STATUS_HTTPERROR:
+                    new_filename = 'RORREPTTH_' + os.path.basename(self.filename)
+                elif self.status == self.STATUS_TOOMANYISBN:
+                    new_filename = 'YNAMOOT_' + os.path.basename(self.filename)
+                else:
+                    new_filename = 'NRAW_' + os.path.basename(self.filename)
+            else:
+                new_filename = 'DELIAF_' + os.path.basename(self.filename)
             new_filename = os.path.join(dirname, new_filename)
-            log = 'Rename "' + self.filename + '" to "' + new_filename.encode('utf8') + '"'
+            log = 'Rename "' + self.filename + '" to "' + new_filename + '"'
             try:
                 os.rename(self.filename, new_filename)
             except:
